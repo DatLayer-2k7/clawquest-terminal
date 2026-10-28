@@ -1,0 +1,15 @@
+{
+  "name": "clawquest-terminal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ClawQuest - RPG quest manager that runs directly in the terminal",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "node src/index.js",
+    "start": "node src/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
