@@ -12,6 +12,8 @@ const {
   getAchievements,
 } = require('./game');
 const { loadState, saveState, SAVE_PATH } = require('./storage');
+const fs = require('node:fs');
+const { QUEST_ID, CHALLENGE, getSolutionPath, savePythonCode, runPythonChallenge } = require('./coding-arena');
 
 const rl = readline.createInterface({ input: stdin, output: stdout });
 const useColor = Boolean(stdout.isTTY) && !process.env.NO_COLOR;
@@ -111,7 +113,10 @@ async function acceptQuest(state) {
 async function finishQuest(state) {
   clear(); drawHeader(state);
   console.log(paint(' HOÀN THÀNH NHIỆM VỤ', 'bold'));
-  const quest = await chooseQuest(state, state.quests.filter((q) => q.status === 'active'), 'Chọn số nhiệm vụ đã hoàn thành: ');
+  if (state.quests.some((q) => q.id === QUEST_ID && q.status === 'active')) {
+    console.log(paint('Nhiệm vụ lập trình phải được xác minh trong Coding Arena để nhận EXP.', 'cyan'));
+  }
+  const quest = await chooseQuest(state, state.quests.filter((q) => q.status === 'active' && q.id !== QUEST_ID), 'Chọn số nhiệm vụ đã hoàn thành: ');
   if (!quest) return state;
   const previousLevel = getLevelInfo(state.totalXp).level;
   const updated = completeQuest(state, quest.id);
@@ -129,6 +134,142 @@ async function finishQuest(state) {
   await pause();
   return updated;
 }
+
+
+
+async function codingArena(state) {
+  const quest = state.quests.find((item) => item.id === QUEST_ID);
+  clear();
+  drawHeader(state);
+  console.log(paint(' CODING ARENA // PHÒNG LUYỆN LẬP TRÌNH', 'bold'));
+  console.log(paint(CHALLENGE.title, 'cyan'));
+  console.log(CHALLENGE.prompt);
+  console.log('Bộ kiểm thử sẽ kiểm tra:');
+  CHALLENGE.examples.forEach((example) => console.log('  • ' + example.call + ' phải trả về ' + example.expected));
+  console.log(paint('Chỉ chạy code do ông tự viết hoặc hiểu rõ. Code chạy với quyền hiện tại của Windows.', 'dim'));
+
+  if (!quest) {
+    console.log(paint('Không tìm thấy nhiệm vụ Python trong dữ liệu lưu.', 'red'));
+    await pause();
+    return state;
+  }
+  if (quest.status === 'completed') {
+    console.log(paint('Nhiệm vụ này đã hoàn thành. EXP không thể nhận lần thứ hai.', 'green'));
+    await pause();
+    return state;
+  }
+  if (quest.status === 'available') {
+    state = startQuest(state, QUEST_ID);
+    saveState(state);
+    console.log(paint('Đã tự nhận nhiệm vụ lập trình. Viết code và nộp để chạy kiểm thử.', 'green'));
+  }
+
+  const solutionPath = getSolutionPath();
+  while (true) {
+    const hasSavedCode = fs.existsSync(solutionPath);
+    console.log();
+    if (hasSavedCode) {
+      console.log('Bài gần nhất được lưu tại: ' + solutionPath);
+      console.log('  1. Nhập code mới / sửa bài (nhập lại toàn bộ)');
+      console.log('  2. Chạy lại code đã lưu');
+      console.log('  0. Quay lại menu');
+    } else {
+      console.log('  1. Bắt đầu viết code');
+      console.log('  0. Quay lại menu');
+    }
+
+    const choice = (await rl.question('Chọn hành động: ')).trim();
+    if (choice === '0') return state;
+    if (choice === '2' && hasSavedCode) {
+      const result = runPythonChallenge(solutionPath);
+      state = await handleCodingResult(state, result, solutionPath);
+      if (state.quests.find((item) => item.id === QUEST_ID)?.status === 'completed') return state;
+      continue;
+    }
+    if (choice !== '1') {
+      console.log(paint('Lựa chọn không hợp lệ.', 'red'));
+      continue;
+    }
+
+    clear();
+    drawHeader(state);
+    console.log(paint(' NHẬP CODE PYTHON', 'bold'));
+    console.log('Gõ code từng dòng. Khi xong, gõ :submit trên một dòng riêng.');
+    console.log('Lệnh đặc biệt: :submit = nộp bài, :clear = xóa phần đang nhập, :cancel = quay lại.');
+    console.log(paint('Ví dụ: def tong(a, b):  rồi dòng tiếp theo thụt vào 4 dấu cách: return a + b', 'dim'));
+
+    const lines = [];
+    let cancelled = false;
+    while (true) {
+      const prompt = String(lines.length + 1).padStart(2, '0') + ' | ';
+      const lineText = await rl.question(prompt);
+      if (lineText.trim() === ':submit') break;
+      if (lineText.trim() === ':cancel') {
+        cancelled = true;
+        break;
+      }
+      if (lineText.trim() === ':clear') {
+        lines.length = 0;
+        console.log(paint('Đã xóa code đang nhập.', 'dim'));
+        continue;
+      }
+      lines.push(lineText);
+    }
+
+    if (cancelled) continue;
+    const code = lines.join('\n').trim();
+    if (!code) {
+      console.log(paint('Chưa có code nào được nộp. Hãy thử lại.', 'red'));
+      continue;
+    }
+
+    const savedPath = savePythonCode(code);
+    console.log(paint('Đã lưu bài làm: ' + savedPath, 'dim'));
+    const result = runPythonChallenge(savedPath);
+    state = await handleCodingResult(state, result, savedPath);
+    if (state.quests.find((item) => item.id === QUEST_ID)?.status === 'completed') return state;
+  }
+}
+
+async function handleCodingResult(state, result, solutionPath) {
+  if (result.status === 'passed') {
+    console.log();
+    result.results.forEach((item) => console.log(paint('✓ ' + item.name + ': đúng (' + item.actual + ')', 'green')));
+    const quest = state.quests.find((item) => item.id === QUEST_ID);
+    const previousLevel = getLevelInfo(state.totalXp).level;
+    const updated = completeQuest(state, QUEST_ID);
+    if (updated !== state) {
+      saveState(updated);
+      console.log(paint('\n✦ QUEST CLEAR: ' + quest.title, 'green'));
+      console.log(paint('+' + quest.rewardXp + ' EXP', 'gold'));
+      const nextLevel = getLevelInfo(updated.totalXp).level;
+      if (nextLevel > previousLevel) console.log(paint('★ LÊN CẤP! Cấp ' + previousLevel + ' → cấp ' + nextLevel + '!', 'purple'));
+      console.log(paint('Bài giải đã được lưu lại. Bạn có thể xem tại:', 'dim'));
+      console.log(solutionPath);
+      await pause('Nhấn Enter để quay lại menu...');
+      return updated;
+    }
+    console.log(paint('Nhiệm vụ này đã được tính thưởng trước đó; không cộng EXP lần nữa.', 'gold'));
+    await pause();
+    return state;
+  }
+
+  console.log();
+  if (result.status === 'failed') {
+    (result.results || []).forEach((item) => {
+      const lineText = (item.passed ? '✓ ' : '✗ ') + item.name + ' — mong đợi ' + item.expected + ', nhận được ' + item.actual;
+      console.log(paint(lineText, item.passed ? 'green' : 'red'));
+    });
+    console.log(paint('Có kiểm thử chưa đạt. Code vẫn được lưu, ông có thể sửa rồi nộp lại.', 'gold'));
+  } else {
+    console.log(paint(result.message || 'Không chạy được bài làm.', 'red'));
+    if (result.traceback) console.log(paint(result.traceback, 'dim'));
+    console.log(paint('Nhiệm vụ vẫn đang làm và chưa được cộng EXP. Sửa bài rồi thử lại nhé.', 'gold'));
+  }
+  await pause('Nhấn Enter để thử lại...');
+  return state;
+}
+
 
 async function createNewQuest(state) {
   clear(); drawHeader(state);
@@ -219,22 +360,24 @@ async function main() {
     console.log(paint(' MENU CHÍNH', 'bold'));
     console.log(' 1. Xem Quest Board');
     console.log(' 2. Nhận nhiệm vụ');
-    console.log(' 3. Hoàn thành nhiệm vụ');
-    console.log(' 4. Tạo nhiệm vụ mới');
-    console.log(' 5. Hồ sơ & thành tựu');
-    console.log(' 6. Nhật ký hành trình');
-    console.log(' 7. Đổi tên nhân vật');
+    console.log(' 3. Coding Arena // viết code và chạy test');
+    console.log(' 4. Hoàn thành nhiệm vụ không cần code');
+    console.log(' 5. Tạo nhiệm vụ mới');
+    console.log(' 6. Hồ sơ & thành tựu');
+    console.log(' 7. Nhật ký hành trình');
+    console.log(' 8. Đổi tên nhân vật');
     console.log(' 0. Lưu và thoát');
     console.log(line());
     const choice = (await rl.question('Chọn hành động: ')).trim();
     switch (choice) {
       case '1': await viewQuestBoard(state); break;
       case '2': state = await acceptQuest(state); break;
-      case '3': state = await finishQuest(state); break;
-      case '4': state = await createNewQuest(state); break;
-      case '5': await showProfile(state); break;
-      case '6': await showHistory(state); break;
-      case '7': state = await renamePlayer(state); saveState(state); break;
+      case '3': state = await codingArena(state); break;
+      case '4': state = await finishQuest(state); break;
+      case '5': state = await createNewQuest(state); break;
+      case '6': await showProfile(state); break;
+      case '7': await showHistory(state); break;
+      case '8': state = await renamePlayer(state); saveState(state); break;
       case '0':
         saveState(state);
         console.log(paint(`\nĐã lưu hành trình tại: ${SAVE_PATH}`, 'green'));
